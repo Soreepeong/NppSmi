@@ -77,6 +77,7 @@ private:
 	
 	STRING FindOrAskSimilarMediaFile() const;
 	void TryOpenMedia();
+	void FormatMessageAndShowError(DWORD dwMessageId);
 
 #pragma push_macro("MENU_FUNCTION")
 #pragma push_macro("MENU_SEPARATOR")
@@ -86,7 +87,6 @@ private:
 	MENU_FUNCTION(ToggleForceShortcutIfSmi)
 	MENU_FUNCTION(InsertBeginningTimecode)
 	MENU_FUNCTION(InsertEndingTimecode)
-	MENU_FUNCTION(UpdateCurrentLineTimestamp)
 	MENU_SEPARATOR(0)
 	MENU_FUNCTION(ToggleOpenMediaAutomatically)
 	MENU_FUNCTION(OpenMedia)

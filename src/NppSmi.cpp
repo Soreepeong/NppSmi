@@ -200,24 +200,51 @@ STRING NppSmi::FindOrAskSimilarMediaFile() const {
 }
 
 void NppSmi::TryOpenMedia() {
-	STRING mpcHcPath;
-	bool mpcHcFound;
-	std::tie(mpcHcFound, mpcHcPath) = MpcHcRemote::GetInstallationPath();
-	if (!mpcHcFound)
-		MessageBox(m_hNpp, mpcHcPath.c_str(), TEXT("NppSmi Error"), MB_ICONERROR | MB_OK);
+	HANDLE h = CreateThread(nullptr, 0, static_cast<LPTHREAD_START_ROUTINE>([](PVOID p) -> DWORD {
+		NppSmi* const self = reinterpret_cast<NppSmi*>(p);
+		STRING mpcHcPath;
+		bool mpcHcFound;
+		std::tie(mpcHcFound, mpcHcPath) = MpcHcRemote::GetInstallationPath();
+		if (!mpcHcFound)
+			MessageBox(self->m_hNpp, mpcHcPath.c_str(), TEXT("NppSmi Error"), MB_ICONERROR | MB_OK);
 
-	const auto mediaFile = FindOrAskSimilarMediaFile();
+		const auto mediaFile = self->FindOrAskSimilarMediaFile();
 
-	STARTUPINFO si;
-	PROCESS_INFORMATION pi;
-	ZeroMemory(&si, sizeof si);
-	ZeroMemory(&pi, sizeof pi);
-	si.cb = sizeof si;
+		STARTUPINFO si;
+		PROCESS_INFORMATION pi;
+		ZeroMemory(&si, sizeof si);
+		ZeroMemory(&pi, sizeof pi);
+		si.cb = sizeof si;
 
-	auto commandLine = TEXT("\"") + mpcHcPath + TEXT("\" \"") + mediaFile + TEXT("\"");
-	if (!CreateProcess(mpcHcPath.c_str(), &commandLine[0], nullptr, nullptr, false, 0, nullptr, nullptr, &si, &pi)) {
-		CloseHandle(pi.hProcess);
-		CloseHandle(pi.hThread);
+		auto commandLine = TEXT("\"") + mpcHcPath + TEXT("\" \"") + mediaFile + TEXT("\"");
+		if (CreateProcess(mpcHcPath.c_str(), &commandLine[0], nullptr, nullptr, false, 0, nullptr, nullptr, &si, &pi)) {
+			CloseHandle(pi.hProcess);
+			CloseHandle(pi.hThread);
+		} else
+			self->FormatMessageAndShowError(GetLastError());
+
+		return 0;
+	}), this, 0, nullptr);
+	if (!h)
+		FormatMessageAndShowError(GetLastError());
+	else
+		CloseHandle(h);
+}
+
+void NppSmi::FormatMessageAndShowError(DWORD dwMessageId) {
+	LPTSTR errorText = nullptr;
+
+	FormatMessage(FORMAT_MESSAGE_FROM_SYSTEM | FORMAT_MESSAGE_ALLOCATE_BUFFER | FORMAT_MESSAGE_IGNORE_INSERTS, nullptr,
+		dwMessageId,
+		MAKELANGID(LANG_NEUTRAL, SUBLANG_DEFAULT),
+		reinterpret_cast<LPTSTR>(&errorText),
+		0,
+		nullptr);
+
+	if (errorText) {
+		STRING str = TEXT("Could not open MPC-HC: ") + STRING(errorText);
+		MessageBox(m_hNpp, str.c_str(), TEXT("NppSmi"), MB_OK | MB_ICONERROR);
+		LocalFree(errorText);
 	}
 }
 
@@ -298,9 +325,6 @@ void NppSmi::MenuFunctionInsertEndingTimecode() {
 	LockWindowUpdate(nullptr);
 }
 
-void NppSmi::MenuFunctionUpdateCurrentLineTimestamp() {
-}
-
 void NppSmi::MenuFunctionToggleOpenMediaAutomatically() {
 	SetMenuChecked(m_menuIndexToggleOpenMediaAutomatically, m_config.autoOpenMedia = !m_config.autoOpenMedia);
 }
@@ -355,7 +379,6 @@ std::tuple<std::vector<struct FuncItem>, std::shared_ptr<std::list<struct Shortc
 	MENU_FN_CHECK("Prioritize shortcut keys if a SMI file is active", ToggleForceShortcutIfSmi, m_config.forceShortcutIfSmi);
 	MENU_FN_SHORTCUT("Insert beginning timecode", InsertBeginningTimecode, false, false, false, VK_F5);
 	MENU_FN_SHORTCUT("Insert ending timecode", InsertEndingTimecode, false, false, false, VK_F6);
-	MENU_FN_SHORTCUT("Update current line timestamp", UpdateCurrentLineTimestamp, false, false, false, VK_F7);
 	MENU_SEPARATOR();
 	MENU_FN_CHECK("Open media automatically", ToggleOpenMediaAutomatically, m_config.autoOpenMedia);
 	MENU_FN("Open media", OpenMedia);
