@@ -3,6 +3,7 @@
 #include <WinSock2.h>
 #include <Windows.h>
 #include <tuple>
+#include <cinttypes>
 
 namespace MpcHcRemote {
 	std::regex positionMatcher("<p id=\"position\">([0-9]+)</p>");
@@ -80,7 +81,7 @@ namespace MpcHcRemote {
 
 	bool Seek(int64_t position) {
 		char req[65536], req2[1024];
-		snprintf(req2, sizeof(req2), "wm_command=-1&position=%lld:%lld:%lld:%lld", position / 3600000, (position / 60000) % 60, (position / 1000) % 60, position % 1000);
+		snprintf(req2, sizeof(req2), "wm_command=-1&position=%" PRId64 ":%" PRId64 ":%" PRId64 ":%" PRId64 "", position / 3600000, position / 60000 % 60, position / 1000 % 60, position % 1000);
 		snprintf(req, sizeof(req), "POST /command.html HTTP/1.1\r\nContent-Type: application/x-www-form-urlencoded\r\nContent-Length: %zu\r\n\r\n%s", strlen(req2), req2);
 
 		bool result;
@@ -89,7 +90,7 @@ namespace MpcHcRemote {
 		return result;
 	}
 
-	std::tuple<bool, STRING> GetInstallationPath() {
+	std::tuple<bool, SSTRING> GetInstallationPath() {
 		TCHAR szMpcHcPath[MAX_PATH];
 		DWORD len = MAX_PATH;
 		DWORD res = 0;

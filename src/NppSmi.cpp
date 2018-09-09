@@ -4,14 +4,115 @@
 #include <fstream>
 #include "MpcHcRemote.h"
 #include <regex>
+#include <cinttypes>
 
 namespace UsefulRegexs {
-	const std::regex SYNC_MATCHER("<sync(?=\\s)[^<>]*\\sstart=(['\"]?)(\\d+)\\1(?=\\s|>)[^<>]*>(?:<P>)?", std::regex_constants::icase);
-	const std::regex TAG_REMOVER("</?p\\b[^<>]*>", std::regex_constants::icase);
-	const std::regex BR_REPLACER("<br\\b[^<>]*>", std::regex_constants::icase);
-	const std::regex MULTILINE_MATCHER("\n+");
-	const std::regex SPACE_MATCHER("\\s+");
+	const std::regex SYNC_MATCHER(R"(<sync(?=\s)[^<>]*\s)" R"(start=(['"]?)(\d+)\1(?=\s|>)[^<>]*>(?:<P>)?)", std::regex_constants::icase);
+	const std::regex TAG_REMOVER(R"(</?p\b[^<>]*>)", std::regex_constants::icase);
+	const std::regex BR_REPLACER(R"(<br\b[^<>]*>)", std::regex_constants::icase);
+	const std::regex MULTILINE_MATCHER(R"(\n+)");
+	const std::regex SPACE_MATCHER(R"(\s+)");
 }
+
+class NppSmi::ScintillaWorker {
+	const NppSmi& m_nppSmi;
+	HWND const m_hScintilla; // NOLINT(misc-misplaced-const)
+
+	static HWND FindCurrentScintilla(const NppSmi& nppSmi) {
+		int which = -1;
+		SendMessage(nppSmi.m_hNpp, NPPM_GETCURRENTSCINTILLA, 0, reinterpret_cast<LPARAM>(&which));
+		return which == 0 ? nppSmi.m_hSc1 : nppSmi.m_hSc2;
+	}
+
+public:
+	enum : int {
+		PRIMARY = 0,
+		SECONDARY = 1,
+		ACTIVE = 2,
+	};
+
+	ScintillaWorker(const ScintillaWorker&) = delete;
+	ScintillaWorker(ScintillaWorker&&) = delete;
+	ScintillaWorker& operator =(const ScintillaWorker&) = delete;
+	ScintillaWorker& operator =(ScintillaWorker&&) = delete;
+	explicit ScintillaWorker(NppSmi* const smi, const size_t which = ACTIVE)
+		: m_nppSmi(*smi)
+		, m_hScintilla(
+			which == ACTIVE
+			? FindCurrentScintilla(m_nppSmi)
+			: which == PRIMARY
+			? m_nppSmi.m_hSc1
+			: m_nppSmi.m_hSc2
+		) {
+		SendMessage(m_hScintilla, WM_SETREDRAW, FALSE, 0);
+		SendMessage(m_hScintilla, SCI_BEGINUNDOACTION, 0, 0);
+	}
+	~ScintillaWorker() {
+		SendMessage(m_hScintilla, SCI_ENDUNDOACTION, 0, 0);
+		SendMessage(m_hScintilla, WM_SETREDRAW, TRUE, 0);
+		InvalidateRect(m_hScintilla, nullptr, false);
+	}
+
+	size_t GetCurrentPos() const {
+		return SendMessage(m_hScintilla, SCI_GETCURRENTPOS, 0, 0);
+	}
+
+	size_t GetLineNumberFromPosition(const size_t pos) const {
+		return static_cast<size_t>(SendMessage(m_hScintilla, SCI_LINEFROMPOSITION, pos, 0));
+	}
+
+	size_t GetCurrentLineNumber() const {
+		return GetLineNumberFromPosition(GetCurrentPos());
+	}
+
+	size_t GetLineCount() const {
+		return SendMessage(m_hScintilla, SCI_GETLINECOUNT, 0, 0);
+	}
+
+	size_t GetLineLength(const size_t lineNumber) const {
+		return SendMessage(m_hScintilla, SCI_LINELENGTH, lineNumber, 0);
+	}
+
+	std::string GetLine(const size_t lineNumber) const {
+		const auto line = std::string(static_cast<size_t>(GetLineLength(lineNumber)) + 1, '\0');
+		SendMessage(m_hScintilla, SCI_GETLINE, lineNumber, reinterpret_cast<WPARAM>(&line[0]));
+		return line;
+	}
+
+	size_t GetPositionFromLine(const size_t lineNumber) const {
+		return SendMessage(m_hScintilla, SCI_POSITIONFROMLINE, lineNumber, 0);
+	}
+
+	// ReSharper disable CppMemberFunctionMayBeConst
+	void SetAnchor(const size_t pos) {
+		SendMessage(m_hScintilla, SCI_SETANCHOR, pos, 0);
+	}
+
+	void MoveCursorToEnd() {
+		SendMessage(m_hScintilla, SCI_LINEEND, 0, 0);
+	}
+
+	void MoveCursorToLine(const size_t lineNumber) const {
+		SendMessage(m_hScintilla, SCI_GOTOLINE, lineNumber, 0);
+	}
+
+	void MoveCursorToHomeOfLine() {
+		SendMessage(m_hScintilla, SCI_HOME, 0, 0);
+	}
+
+	void ReplaceSelection(const std::string &newString) {
+		SendMessage(m_hScintilla, SCI_REPLACESEL, 0, reinterpret_cast<LPARAM>(&newString[0]));
+	}
+
+	void AddText(const std::string& newString) {
+		SendMessage(m_hScintilla, SCI_ADDTEXT, newString.size(), reinterpret_cast<LPARAM>(&newString[0]));
+	}
+
+	void ScrollBy(const int columns, const int lines) {
+		SendMessage(m_hScintilla, SCI_LINESCROLL, columns, lines);
+	}
+	// ReSharper restore CppMemberFunctionMayBeConst
+};
 
 NppSmi::NppSmi(HINSTANCE hModule, const struct NppData &data, const std::tuple<std::vector<struct FuncItem>, std::shared_ptr<std::list<struct ShortcutKey>>> & menus)
 	: m_hModule(hModule)
@@ -20,8 +121,8 @@ NppSmi::NppSmi(HINSTANCE hModule, const struct NppData &data, const std::tuple<s
 	, m_hSc2(data._scintillaSecondHandle)
 	, m_configFilePath{ 0 }
 	, m_moduleName{ 0 }
-	, FUNCTIONS(std::get<0>(menus))
-	, SHORTCUT_KEYS(std::get<1>(menus)) {
+	, m_menuFunctions(std::get<0>(menus))
+	, m_menuShortcutKeys(std::get<1>(menus)) {
 
 	WSADATA w;
 	WSAStartup((MAKEWORD(2, 2)), &w);
@@ -45,17 +146,17 @@ NppSmi::NppSmi(HINSTANCE hModule, const struct NppData &data, const std::tuple<s
 	_tcsncpy_s(m_moduleName, MAX_PATH, _tcsrchr(m_moduleName, '\\') + 1, MAX_PATH);
 
 	m_hhkLowLevelKeyboard = SetWindowsHookEx(WH_KEYBOARD_LL, static_cast<HOOKPROC>([](int nCode, WPARAM wParam, LPARAM lParam) {
-		return INSTANCE->LowLevelKeyboardProc(nCode, wParam, lParam);
+		return instance->LowLevelKeyboardProc(nCode, wParam, lParam);
 	}), m_hModule, 0);
 
 	m_prevWndProc = reinterpret_cast<WNDPROC>(GetWindowLongPtr(m_hNpp, GWLP_WNDPROC));
-	SetWindowLongPtr(m_hNpp, GWLP_WNDPROC, reinterpret_cast<LONG_PTR>(static_cast<WNDPROC>([](HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) -> LRESULT {
-		return INSTANCE->OnBeforeNppWndProc(hwnd, uMsg, wParam, lParam);
+	SetWindowLongPtr(m_hNpp, GWLP_WNDPROC, reinterpret_cast<LONG_PTR>(static_cast<WNDPROC>([](HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lParam) -> LRESULT {
+		return instance->OnBeforeNppWndProc(hWnd, uMsg, wParam, lParam);
 	})));
 }
 
 NppSmi::NppSmi(HINSTANCE hModule, const NppData &data)
-	: NppSmi(hModule, data, GetMenuFunctions()) {
+	: NppSmi(hModule, data, CreateMenuFunctions()) {
 }
 
 NppSmi::~NppSmi() {
@@ -73,6 +174,10 @@ NppSmi::~NppSmi() {
 		}).dump();
 }
 
+const std::vector<FuncItem>& NppSmi::GetMenuFunctions() const {
+	return m_menuFunctions;
+}
+
 void NppSmi::OnScintillaMessage(SCNotification* notifyCode) {
 	switch (notifyCode->nmhdr.code) {
 		case NPPN_BUFFERACTIVATED:
@@ -84,6 +189,10 @@ void NppSmi::OnScintillaMessage(SCNotification* notifyCode) {
 			if (m_isCurrentDocumentSMI)
 				SendMessage(m_hNpp, NPPM_SETCURRENTLANGTYPE, 0, L_HTML);
 			break;
+
+		default:
+			// does nothing
+			break;
 	}
 }
 
@@ -93,8 +202,9 @@ void NppSmi::DetermineCurrentDocumentIsSmi() {
 	m_isCurrentDocumentSMI = 0 == StrNCmpI(extension, TEXT(".SMI"), 4);
 }
 
-LRESULT NppSmi::OnBeforeNppWndProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) {
-	return CallWindowProc(m_prevWndProc, hwnd, uMsg, wParam, lParam);
+// ReSharper disable CppMemberFunctionMayBeStatic CppMemberFunctionMayBeConst
+LRESULT NppSmi::OnBeforeNppWndProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lParam) {
+	return CallWindowProc(m_prevWndProc, hWnd, uMsg, wParam, lParam);
 }
 
 LRESULT NppSmi::OnCalledByNppWndProc(UINT, WPARAM, LPARAM) {
@@ -111,11 +221,12 @@ LRESULT NppSmi::LowLevelKeyboardProc(int nCode, WPARAM wParam, LPARAM lParam) {
 			case WM_SYSKEYDOWN:
 			case WM_KEYUP:
 			case WM_SYSKEYUP:
+			{
 				const auto &p = *reinterpret_cast<PKBDLLHOOKSTRUCT>(lParam);
 				const auto ctrl = !!GetAsyncKeyState(VK_CONTROL);
 				const auto alt = !!GetAsyncKeyState(VK_MENU);
 				const auto shift = !!GetAsyncKeyState(VK_SHIFT);
-				for (const auto &fn : FUNCTIONS) {
+				for (const auto &fn : m_menuFunctions) {
 					if (fn._pShKey == nullptr)
 						continue;
 
@@ -127,25 +238,28 @@ LRESULT NppSmi::LowLevelKeyboardProc(int nCode, WPARAM wParam, LPARAM lParam) {
 						case WM_KEYDOWN:
 						case WM_SYSKEYDOWN:
 							PostMessage(m_hNpp, WM_COMMAND, fn._cmdID, 0);
+						default:
+							// does nothing
+							break;
 					}
 					return 1;
 				}
+				break;
+			}
+			default:
+				// does nothing
+				break;
 		}
 	}
 	return CallNextHookEx(m_hhkLowLevelKeyboard, nCode, wParam, lParam);
 }
 
-HWND NppSmi::GetCurrentScintilla() const {
-	auto which = -1;
-	SendMessage(m_hNpp, NPPM_GETCURRENTSCINTILLA, 0, reinterpret_cast<LPARAM>(&which));
-	return which == 0 ? m_hSc1 : m_hSc2;
-}
-
 void NppSmi::SetMenuChecked(int menuIndex, bool isChecked) {
-	CheckMenuItem(GetMenu(m_hNpp), FUNCTIONS[menuIndex]._cmdID, MF_BYCOMMAND | (isChecked ? MF_CHECKED : MF_UNCHECKED));
+	CheckMenuItem(GetMenu(m_hNpp), m_menuFunctions[menuIndex]._cmdID, MF_BYCOMMAND | (isChecked ? MF_CHECKED : MF_UNCHECKED));
 }
+// ReSharper restore CppMemberFunctionMayBeConst CppMemberFunctionMayBeStatic
 
-STRING NppSmi::FindOrAskSimilarMediaFile() const {
+SSTRING NppSmi::FindOrAskSimilarMediaFile() const {
 	const auto *szMediaTypes = TEXT("3G2;3GP;3GP2;3GPP;AMV;ASF;AVI;DIVX;EVO;F4V;FLV;GVI;HDMOV;IFO;K3G;M2T;M2TS;MKV;MK3D;MOV;MP2V;MP4;MPE;MPEG;MPG;MPV2;MQV;MTS;MTV;NSV;OGM;OGV;QT;RM;RMVB;RV;SKM;TP;TPR;TS;VOB;WEBM;WM;WMP;WMV;A52;AAC;AC3;AIF;AIFC;AIFF;ALAC;AMR;APE;AU;CDA;DTS;FLA;FLAC;M1A;M2A;M4A;M4B;M4P;MID;MKA;MP1;MP2;MP3;MPA;MPC;MPP;MP+;NSA;OFR;OFS;OGA;OGG;RA;SND;SPX;TTA;WAV;WAVE;WMA;WV");
 	TCHAR szFile[MAX_PATH] = { 0, };
 	TCHAR szBasePath[MAX_PATH + 3] = { 0, };
@@ -200,15 +314,17 @@ STRING NppSmi::FindOrAskSimilarMediaFile() const {
 }
 
 void NppSmi::TryOpenMedia() {
-	HANDLE h = CreateThread(nullptr, 0, static_cast<LPTHREAD_START_ROUTINE>([](PVOID p) -> DWORD {
+	const auto h = CreateThread(nullptr, 0, static_cast<LPTHREAD_START_ROUTINE>([](PVOID p) -> DWORD {
 		NppSmi* const self = reinterpret_cast<NppSmi*>(p);
-		STRING mpcHcPath;
+		SSTRING mpcHcPath;
 		bool mpcHcFound;
 		std::tie(mpcHcFound, mpcHcPath) = MpcHcRemote::GetInstallationPath();
 		if (!mpcHcFound)
 			MessageBox(self->m_hNpp, mpcHcPath.c_str(), TEXT("NppSmi Error"), MB_ICONERROR | MB_OK);
 
 		const auto mediaFile = self->FindOrAskSimilarMediaFile();
+		if (mediaFile.empty())
+			return 0;
 
 		STARTUPINFO si;
 		PROCESS_INFORMATION pi;
@@ -231,7 +347,7 @@ void NppSmi::TryOpenMedia() {
 		CloseHandle(h);
 }
 
-void NppSmi::FormatMessageAndShowError(DWORD dwMessageId) {
+void NppSmi::FormatMessageAndShowError(DWORD dwMessageId) const {
 	LPTSTR errorText = nullptr;
 
 	FormatMessage(FORMAT_MESSAGE_FROM_SYSTEM | FORMAT_MESSAGE_ALLOCATE_BUFFER | FORMAT_MESSAGE_IGNORE_INSERTS, nullptr,
@@ -242,7 +358,7 @@ void NppSmi::FormatMessageAndShowError(DWORD dwMessageId) {
 		nullptr);
 
 	if (errorText) {
-		STRING str = TEXT("Could not open MPC-HC: ") + STRING(errorText);
+		SSTRING str = TEXT("Could not open MPC-HC: ") + SSTRING(errorText);
 		MessageBox(m_hNpp, str.c_str(), TEXT("NppSmi"), MB_OK | MB_ICONERROR);
 		LocalFree(errorText);
 	}
@@ -255,7 +371,6 @@ void NppSmi::MenuFunctionToggleForceShortcutIfSmi() {
 
 void NppSmi::MenuFunctionInsertBeginningTimecode() {
 	const auto time = MpcHcRemote::GetCurrentPlayerTimestamp();
-	const auto curScintilla = GetCurrentScintilla();
 
 	if (time == -1) {
 		if (m_config.autoOpenMedia)
@@ -263,66 +378,46 @@ void NppSmi::MenuFunctionInsertBeginningTimecode() {
 		return;
 	}
 
-	LockWindowUpdate(m_hNpp);
+	ScintillaWorker worker(this);
+	worker.MoveCursorToHomeOfLine();
+	const auto curLine = worker.GetCurrentLineNumber();
+	const auto line = worker.GetLine(curLine);
 
-	SendMessage(curScintilla, SCI_BEGINUNDOACTION, 0, 0);
-	SendMessage(curScintilla, SCI_HOME, 0, 0);
-
-	auto replaced = false;
-	const auto curLine = static_cast<size_t>(SendMessage(curScintilla, SCI_LINEFROMPOSITION, SendMessage(curScintilla, SCI_GETCURRENTPOS, 0, 0), 0));
-	const std::string line(static_cast<size_t>(SendMessage(curScintilla, SCI_LINELENGTH, curLine, 0)) + 1, '\0');
-	SendMessage(curScintilla, SCI_GETLINE, curLine, reinterpret_cast<WPARAM>(&line[0]));
-
-	std::string buf;
-	buf.resize(512);
-	buf.resize(snprintf(&buf[0], buf.capacity(), "<Sync Start=%lld><P>", time));
+	std::string newSync(512, '\0');
+	newSync.resize(snprintf(&newSync[0], newSync.capacity(), "<Sync Start=%" PRId64 "><P>", time));
 
 	std::smatch match;
-	if (std::regex_search(line, match, UsefulRegexs::SYNC_MATCHER) && match.size() > 1) {
-		SendMessage(curScintilla, SCI_SETANCHOR, match.str(0).length() + SendMessage(curScintilla, SCI_POSITIONFROMLINE, curLine, 0), 0);
-
-		SendMessage(curScintilla, SCI_REPLACESEL, NULL, reinterpret_cast<LPARAM>(&buf[0]));
-		replaced = true;
-	}
-
-	if (!replaced)
-		SendMessage(curScintilla, SCI_ADDTEXT, buf.size(), reinterpret_cast<LPARAM>(&buf[0]));
-
-	const auto lineCount = static_cast<size_t>(SendMessage(curScintilla, SCI_GETLINECOUNT, 0, 0));
-	if (curLine == lineCount - 1) { // last line?
-		SendMessage(curScintilla, SCI_LINEEND, 0, 0);
-		SendMessage(curScintilla, SCI_ADDTEXT, 2, reinterpret_cast<LPARAM>("\r\n"));
+	const auto isReplacing = std::regex_search(line, match, UsefulRegexs::SYNC_MATCHER) && match.size() > 1;
+	if (isReplacing) {
+		worker.SetAnchor(match.str(0).length() + worker.GetPositionFromLine(curLine));
+		worker.ReplaceSelection(newSync);
 	} else
-		SendMessage(curScintilla, SCI_GOTOLINE, curLine + 1, 0);
+		worker.AddText(newSync);
 
-	if (!replaced)
-		SendMessage(curScintilla, SCI_LINESCROLL, 0, 1);
+	const auto lineCount = worker.GetLineCount();
+	if (curLine == lineCount - 1) { // last line?
+		worker.MoveCursorToEnd();
+		worker.AddText("\r\n");
+	} else
+		worker.MoveCursorToLine(curLine + 1);
 
-	SendMessage(curScintilla, SCI_ENDUNDOACTION, 0, 0);
-	LockWindowUpdate(nullptr);
+	if (!isReplacing)
+		worker.ScrollBy(0, 1);
 }
 
 void NppSmi::MenuFunctionInsertEndingTimecode() {
 	const auto time = MpcHcRemote::GetCurrentPlayerTimestamp();
-	const auto curScintilla = GetCurrentScintilla();
-
 	if (time == -1) {
 		TryOpenMedia();
 		return;
 	}
 
-	std::string buf;
-	buf.resize(512);
-	buf.resize(snprintf(&buf[0], buf.capacity(), "<Sync Start=%zd><P>&nbsp;\r\n", time));
+	std::string newSync(512, '\0');
+	newSync.resize(snprintf(&newSync[0], newSync.capacity(), "<Sync Start=%" PRId64 "><P>&nbsp;\r\n", time));
 
-	LockWindowUpdate(m_hNpp);
-
-	SendMessage(curScintilla, SCI_BEGINUNDOACTION, 0, 0);
-	SendMessage(curScintilla, SCI_HOME, 0, 0);
-	SendMessage(curScintilla, SCI_ADDTEXT, buf.size(), reinterpret_cast<LPARAM>(&buf[0]));
-	SendMessage(curScintilla, SCI_LINESCROLL, 0, 1);
-	SendMessage(curScintilla, SCI_ENDUNDOACTION, 0, 0);
-	LockWindowUpdate(nullptr);
+	ScintillaWorker worker(this);
+	worker.AddText(newSync);
+	worker.ScrollBy(0, 1);
 }
 
 void NppSmi::MenuFunctionToggleOpenMediaAutomatically() {
@@ -340,10 +435,20 @@ void NppSmi::MenuFunctionPlayOrPause() {
 	}
 }
 
-void NppSmi::MenuFunctionPlayCurrentLine() {
-}
-
 void NppSmi::MenuFunctionGoToCurrentLine() {
+	ScintillaWorker worker(this);
+	auto curLine = worker.GetCurrentLineNumber();
+	do {
+		const auto line = worker.GetLine(curLine);
+		std::smatch match;
+		if (std::regex_search(line, match, UsefulRegexs::SYNC_MATCHER) && match.size() > 1) {
+			const auto pos = strtoll(match.str(2).c_str(), nullptr, 10);
+			if (!MpcHcRemote::Seek(pos))
+				if (m_config.autoOpenMedia)
+					TryOpenMedia();
+			break;
+		}
+	} while (--curLine != static_cast<size_t>(-1));
 }
 
 void NppSmi::MenuFunctionRewind() {
@@ -364,18 +469,18 @@ void NppSmi::MenuFunctionFastForward() {
 		MpcHcRemote::Seek(time + 3000);
 }
 
-TCHAR* const NppSmi::PLUGIN_NAME = TEXT("NppSmi");
-TCHAR* const NppSmi::PLUGIN_CONFIG_FILENAME = TEXT("NppSmi.json");
-std::shared_ptr<NppSmi> NppSmi::INSTANCE = nullptr;
+const TCHAR* const NppSmi::PLUGIN_NAME = TEXT("NppSmi");
+const TCHAR* const NppSmi::PLUGIN_CONFIG_FILENAME = TEXT("NppSmi.json");
+std::shared_ptr<NppSmi> NppSmi::instance = nullptr;
 
-#define MENU_FN_SHORTCUT(DESCRIPTION, FUNCTION, CTRL, ALT, SHIFT, VK) menu.insert(menu.end(),{ TEXT(DESCRIPTION), []() { INSTANCE->MenuFunction##FUNCTION(); }, 0, false, (keys->push_back({CTRL, ALT, SHIFT, VK}), &(keys->back()))})
-#define MENU_FN_CHECK(DESCRIPTION, FUNCTION, CHECKED) menu.insert(menu.end(), { TEXT(DESCRIPTION), []() { INSTANCE->MenuFunction##FUNCTION(); }, 0, !!CHECKED, nullptr })
-#define MENU_FN(DESCRIPTION, FUNCTION) menu.insert(menu.end(), { TEXT(DESCRIPTION), []() { INSTANCE->MenuFunction##FUNCTION(); }, 0, false, nullptr })
+#define MENU_FN_SHORTCUT(DESCRIPTION, FUNCTION, CTRL, ALT, SHIFT, VK) menu.insert(menu.end(),{ TEXT(DESCRIPTION), []() { instance->MenuFunction##FUNCTION(); }, 0, false, (keys->push_back({CTRL, ALT, SHIFT, VK}), &(keys->back()))})
+#define MENU_FN_CHECK(DESCRIPTION, FUNCTION, CHECKED) menu.insert(menu.end(), { TEXT(DESCRIPTION), []() { instance->MenuFunction##FUNCTION(); }, 0, !!(CHECKED), nullptr })
+#define MENU_FN(DESCRIPTION, FUNCTION) menu.insert(menu.end(), { TEXT(DESCRIPTION), []() { instance->MenuFunction##FUNCTION(); }, 0, false, nullptr })
 #define MENU_SEPARATOR() menu.insert(menu.end(), { TEXT("---"), nullptr, 0, false, nullptr })
 
-std::tuple<std::vector<struct FuncItem>, std::shared_ptr<std::list<struct ShortcutKey>>> NppSmi::GetMenuFunctions() const {
+std::tuple<std::vector<struct FuncItem>, std::shared_ptr<std::list<struct ShortcutKey>>> NppSmi::CreateMenuFunctions() const {
 	std::vector<FuncItem> menu;
-	std::shared_ptr<std::list<ShortcutKey>> keys = std::make_shared<std::list<ShortcutKey>>();
+	auto keys = std::make_shared<std::list<ShortcutKey>>();
 	MENU_FN_CHECK("Prioritize shortcut keys if a SMI file is active", ToggleForceShortcutIfSmi, m_config.forceShortcutIfSmi);
 	MENU_FN_SHORTCUT("Insert beginning timecode", InsertBeginningTimecode, false, false, false, VK_F5);
 	MENU_FN_SHORTCUT("Insert ending timecode", InsertEndingTimecode, false, false, false, VK_F6);
@@ -383,7 +488,6 @@ std::tuple<std::vector<struct FuncItem>, std::shared_ptr<std::list<struct Shortc
 	MENU_FN_CHECK("Open media automatically", ToggleOpenMediaAutomatically, m_config.autoOpenMedia);
 	MENU_FN("Open media", OpenMedia);
 	MENU_FN_SHORTCUT("Play/Pause", PlayOrPause, false, false, false, VK_F9);
-	MENU_FN_SHORTCUT("Play current line", PlayCurrentLine, false, false, false, VK_F10);
 	MENU_FN_SHORTCUT("Go to current line", GoToCurrentLine, false, false, false, VK_F8);
 	MENU_FN_SHORTCUT("Rewind", Rewind, true, true, false, VK_LEFT);
 	MENU_FN_SHORTCUT("Fast forward", FastForward, true, true, false, VK_RIGHT);

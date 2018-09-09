@@ -28,7 +28,7 @@ BOOL APIENTRY DllMain(HINSTANCE hModule, DWORD  reasonForCall, LPVOID /*lpReserv
 		break;
 
 	case DLL_PROCESS_DETACH:
-		NppSmi::INSTANCE = nullptr;
+		NppSmi::instance = nullptr;
 		break;
 
 	case DLL_THREAD_ATTACH:
@@ -43,7 +43,7 @@ BOOL APIENTRY DllMain(HINSTANCE hModule, DWORD  reasonForCall, LPVOID /*lpReserv
 
 
 extern "C" __declspec(dllexport) void setInfo(NppData notepadPlusData) {
-	NppSmi::INSTANCE = std::make_shared<NppSmi>(g_hModule, notepadPlusData);
+	NppSmi::instance = std::make_shared<NppSmi>(g_hModule, notepadPlusData);
 }
 
 extern "C" __declspec(dllexport) const TCHAR * getName() {
@@ -51,16 +51,17 @@ extern "C" __declspec(dllexport) const TCHAR * getName() {
 }
 
 extern "C" __declspec(dllexport) FuncItem const * getFuncsArray(int *nbF) {
-	*nbF = static_cast<int>(NppSmi::INSTANCE->FUNCTIONS.size());
-	return &NppSmi::INSTANCE->FUNCTIONS[0];
+	const auto &menuFunctions = NppSmi::instance->GetMenuFunctions();
+	*nbF = static_cast<int>(menuFunctions.size());
+	return &menuFunctions[0];
 }
 
 extern "C" __declspec(dllexport) void beNotified(SCNotification *notifyCode) {
-	NppSmi::INSTANCE->OnScintillaMessage(notifyCode);
+	NppSmi::instance->OnScintillaMessage(notifyCode);
 }
 
 extern "C" __declspec(dllexport) LRESULT messageProc(UINT Message, WPARAM wParam, LPARAM lParam) {
-	return NppSmi::INSTANCE->OnCalledByNppWndProc(Message, wParam, lParam);
+	return NppSmi::instance->OnCalledByNppWndProc(Message, wParam, lParam);
 }
 
 #ifdef UNICODE
