@@ -6,11 +6,11 @@
 #include <cinttypes>
 
 namespace MpcHcRemote {
-	std::regex positionMatcher("<p id=\"position\">([0-9]+)</p>");
+	const std::regex POSITION_MATCHER("<p id=\"position\">([0-9]+)</p>");
 
 	std::pair<bool, std::string> GetRequest(const std::string &request) {
-		struct sockaddr_in localhost;
-		memset(&localhost, 0, sizeof(struct sockaddr_in));
+		sockaddr_in localhost{};
+		ZeroMemory(&localhost, sizeof localhost);
 		std::string s;
 		char buf[65536];
 		DWORD port = 0, len = 4;
@@ -23,7 +23,7 @@ namespace MpcHcRemote {
 		localhost.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
 		localhost.sin_port = htons(static_cast<u_short>(port));
 
-		SOCKET connectSocket = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+		auto connectSocket = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
 		if (connectSocket == INVALID_SOCKET) {
 			return std::make_pair(false, "");
 		}
@@ -63,15 +63,15 @@ namespace MpcHcRemote {
 
 		std::smatch m;
 		int64_t pos = -1;
-		if (std::regex_search(response, m, positionMatcher))
+		if (std::regex_search(response, m, POSITION_MATCHER))
 			pos = strtoll(m[1].str().c_str(), nullptr, 10);
 		return pos;
 	}
 
-	bool SendCommand(int cmd) {
+	bool SendCommand(const MpcHcCommand cmd) {
 		char req[65536], req2[1024];
-		snprintf(req2, sizeof req2, "wm_command=%d", cmd);
-		snprintf(req, sizeof req, "POST /command.html HTTP/1.1\r\nContent-Type: application/x-www-form-urlencoded\r\nContent-Length: %zu\r\n\r\n%s", strlen(req2), req2);
+		snprintf(req2, sizeof req2, "wm_command=%d", static_cast<int>(cmd));
+		snprintf(req, sizeof req, "POST /command.html HTTP/1.1\r\nConnection: Close\r\nContent-Type: application/x-www-form-urlencoded\r\nContent-Length: %zu\r\n\r\n%s", strlen(req2), req2);
 
 		bool result;
 		std::string response;
@@ -79,10 +79,10 @@ namespace MpcHcRemote {
 		return result;
 	}
 
-	bool Seek(int64_t position) {
+	bool Seek(const int64_t position) {
 		char req[65536], req2[1024];
-		snprintf(req2, sizeof(req2), "wm_command=-1&position=%" PRId64 ":%" PRId64 ":%" PRId64 ":%" PRId64 "", position / 3600000, position / 60000 % 60, position / 1000 % 60, position % 1000);
-		snprintf(req, sizeof(req), "POST /command.html HTTP/1.1\r\nContent-Type: application/x-www-form-urlencoded\r\nContent-Length: %zu\r\n\r\n%s", strlen(req2), req2);
+		snprintf(req2, sizeof req2, "wm_command=-1&position=%" PRId64 ":%" PRId64 ":%" PRId64 ":%" PRId64 "", position / 3600000, position / 60000 % 60, position / 1000 % 60, position % 1000);
+		snprintf(req, sizeof req, "POST /command.html HTTP/1.1\r\nConnection: Close\r\nContent-Type: application/x-www-form-urlencoded\r\nContent-Length: %zu\r\n\r\n%s", strlen(req2), req2);
 
 		bool result;
 		std::string response;

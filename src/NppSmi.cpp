@@ -429,7 +429,7 @@ void NppSmi::MenuFunctionOpenMedia() {
 }
 
 void NppSmi::MenuFunctionPlayOrPause() {
-	if (!MpcHcRemote::SendCommand(889)) {
+	if (!MpcHcRemote::SendCommand(MpcHcRemote::MpcHcCommand::PLAY_PAUSE)) {
 		if (m_config.autoOpenMedia)
 			TryOpenMedia();
 	}
