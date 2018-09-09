@@ -1,0 +1,17 @@
+*.sdf
+*.sln
+*.suo
+bin/
+bin64/
+vs.proj/Debug
+vs.proj/Release
+vs.proj/x64
+x64/Debug
+x64/Release
+*.opensdf
+*.exp
+*.lib
+*.vcxproj.user
+*.aps
+*.zip
+.vs/
